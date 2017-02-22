@@ -1,0 +1,77 @@
+# Temp files
+*.swp
+*~
+*.trs
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables and archives
+*.exe
+*.out
+*.app
+*.class
+*.jar
+*.rpm
+
+# Build files
+autom4te.cache/
+build-aux/
+.deps/
+m4/*.m4
+*.log
+aclocal.m4
+configure
+config.*
+.dirstamp
+libtool
+Makefile
+stamp-h1
+
+build/
+Debug/
+Release/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeLists.txt.user
+
+# Eclipse configuration
+.autotools
+.cproject
+.settings/
+.metadata/
+*.launch
+*.project
+
+#Ctag files
+buildCtag.sh
+*cscope.files*
+*.tags*
+
+# Others
+doc/html/
+VT-VKx/httpd/tac/monitor/
+crosstool
+tags
+.ycm_extra_conf.*
+*.mp4
