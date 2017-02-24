@@ -6,7 +6,7 @@
 //  Copyright © 2017 Eastgate Software Ltd. All rights reserved.
 //
 
-#include "FFMpegManager.h"
+#include "../include/FFMpegManager.h"
 extern "C"
 {
 #include <libavutil/file.h>
@@ -132,8 +132,8 @@ void concatenateVideos(char** inputFiles, char*  outputFile, int numberFile)
                 c->bit_rate = i_video_stream->codecpar->bit_rate;
                 c->codec_id = i_video_stream->codecpar->codec_id;
                 c->codec_type = i_video_stream->codecpar->codec_type;
-                c->sample_aspect_ratio.num = i_video_stream->time_base.num;
-                c->sample_aspect_ratio.den = i_video_stream->time_base.den;
+                //c->sample_aspect_ratio.num = i_video_stream->time_base.num;
+                //c->sample_aspect_ratio.den = i_video_stream->time_base.den;
                 c->width = i_video_stream->codecpar->width;
                 c->height = i_video_stream->codecpar->height;
                 
@@ -227,8 +227,8 @@ void concatenateVideos(char** inputFiles, char*  outputFile, int numberFile)
                 c->bit_rate = i_video_stream->codecpar->bit_rate;
                 c->codec_id = i_video_stream->codecpar->codec_id;
                 c->codec_type = i_video_stream->codecpar->codec_type;
-                c->sample_aspect_ratio.num = i_video_stream->time_base.num;
-                c->sample_aspect_ratio.den = i_video_stream->time_base.den;
+                //c->sample_aspect_ratio.num = i_video_stream->time_base.num;
+                //c->sample_aspect_ratio.den = i_video_stream->time_base.den;
                 c->width = i_video_stream->codecpar->width;
                 c->height = i_video_stream->codecpar->height;
                 
@@ -343,12 +343,12 @@ void concatenateVideos(char** inputFiles, char*  outputFile, int numberFile)
                 
                 if (i_pkt.pts != AV_NOPTS_VALUE)
                 {
-                    i_pkt.pts = av_rescale_q(i_pkt.pts, o_video_stream->codecpar->sample_aspect_ratio, o_video_stream->time_base);
+                    i_pkt.pts = av_rescale_q(i_pkt.pts, i_video_stream->time_base, o_video_stream->time_base);
                 }
                 
                 if (i_pkt.dts != AV_NOPTS_VALUE)
                 {
-                    i_pkt.dts = av_rescale_q(i_pkt.dts, o_video_stream->codecpar->sample_aspect_ratio, o_video_stream->time_base);
+                    i_pkt.dts = av_rescale_q(i_pkt.dts, i_video_stream->time_base, o_video_stream->time_base);
                 }
             }
             else if (i_pkt.stream_index == audioStreamIndex)
@@ -405,4 +405,19 @@ void concatenateVideos(char** inputFiles, char*  outputFile, int numberFile)
         }
         avformat_close_input(&i_fmt_ctx);
     }
+}
+
+int main(int argc, char* argv[])
+{
+    if(argc<3)
+    {
+        fprintf(stderr, "Please call with enough param\n");
+        fprintf(stderr, "inputFile1 inputFile2 outputFile");
+        return -1;
+    }
+    char *inputFiles[] = {argv[1], argv[2]};
+    concatenateVideos(inputFiles, argv[3]);
+
+    printf("Program ended!\n");    
+    return 0;
 }

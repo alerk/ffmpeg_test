@@ -1,7 +1,7 @@
 // tutorial02.c
 // A pedagogical video player that will stream through every video frame as fast as it can.
 //
-// Code based on FFplay, Copyright (c) 2003 Fabrice Bellard, 
+// Code based on FFplay, Copyright (c) 2003 Fabrice Bellard,
 // and a tutorial by Martin Bohme (boehme@inb.uni-luebeckREMOVETHIS.de)
 // Tested on Gentoo, CVS version 5/01/07 compiled with GCC 4.1.1
 // With updates from https://github.com/chelyaev/ffmpeg-tutorial
@@ -10,9 +10,9 @@
 // on GCC 4.7.2 in Debian February 2015
 //
 // Use
-// 
+//
 // gcc -o tutorial02 tutorial02.c -lavformat -lavcodec -lswscale -lz -lm `sdl-config --cflags --libs`
-// to build (assuming libavformat and libavcodec are correctly installed, 
+// to build (assuming libavformat and libavcodec are correctly installed,
 // and assuming you have sdl-config. Please refer to SDL docs for your installation.)
 //
 // Run using
@@ -22,6 +22,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include <libavutil/imgutils.h>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_thread.h>
@@ -31,6 +32,9 @@
 #endif
 
 #include <stdio.h>
+#include <stdint.h>
+
+typedef unsigned char uint8_t;
 
 // compatibility with newer API
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(55,28,1)
@@ -121,9 +125,13 @@ int main(int argc, char *argv[]) {
     // Allocate video frame
     pFrame=av_frame_alloc();
 
+    int scale_ratio = 3;
+    int scaleWidth = pCodecCtx->width/scale_ratio;
+    int scaleHeight = pCodecCtx->height/scale_ratio;
+
     //Modify from here
     screen = SDL_CreateWindow("FFmpeg Tutorial", SDL_WINDOWPOS_UNDEFINED,
-                              SDL_WINDOWPOS_UNDEFINED, pCodecCtx->width, pCodecCtx->height, 0);
+                              SDL_WINDOWPOS_UNDEFINED, scaleWidth, scaleHeight, 0);
 
     //Old code
 
@@ -141,14 +149,13 @@ int main(int argc, char *argv[]) {
 
     renderer = SDL_CreateRenderer(screen, -1, 0);
     if(!renderer) {
-        fprintf(stderr, "SDL: couldn't craete renderer - exiting\n");
+        fprintf(stderr, "SDL: couldn't create renderer - exiting\n");
         exit(1);
     }
     // Allocate a place to put our YUV image on that screen
-    texture = SDL_CreateTexture(
-                                renderer,
-                                SDL_PIXELFORMAT_YV12, SDL_TEXTUREACCESS_STREAMING,
-                                pCodecCtx->width, pCodecCtx->height);
+    texture = SDL_CreateTexture(renderer,
+        SDL_PIXELFORMAT_YV12, SDL_TEXTUREACCESS_STREAMING,
+        scaleWidth, scaleHeight);
 
     if(!texture) {
         fprintf(stderr, "SDL: could not create texture - exiting\n");
@@ -175,12 +182,28 @@ int main(int argc, char *argv[]) {
     //<<< End old code
 
     //init SWS context for software scaling
-    sws_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, 
-                             pCodecCtx->pix_fmt, pCodecCtx->width, pCodecCtx->height,
-                             PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
+    //sws_getContext params:
+    //srcW, srcH, srcFormat
+    //dstW, dstH, dstFormat
+    //flags, srcFilter, dstFilter, double* params
+
+    sws_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt,
+        pCodecCtx->width/scale_ratio, pCodecCtx->height/scale_ratio, AV_PIX_FMT_YUV420P,
+        SWS_BILINEAR, NULL, NULL, NULL);
 
     //set up YV12 pixel array (12 bits per pixel)
-    yPlaneSz = pCodecCtx->width * pCodecCtx->height;
+    AVFrame* scaleFrame = av_frame_alloc();
+
+    printf("Size of output file: %dx%d\n", scaleWidth, scaleHeight);
+    int numBytes = avpicture_get_size(AV_PIX_FMT_YUV420P, scaleWidth, scaleHeight);
+    uint8_t* frameBuffer = (uint8_t*)av_malloc(numBytes*sizeof(uint8_t));
+    //avpicture_fill((AVPicture*)scaleFrame, frameBuffer, AV_PIX_FMT_YUV420P,
+    //    scaleWidth, scaleHeight);
+    av_image_fill_arrays(scaleFrame->data, scaleFrame->linesize,
+        frameBuffer,
+        AV_PIX_FMT_YUV420P, scaleWidth, scaleHeight, 1); //by default, align = 1;
+
+    yPlaneSz = pCodecCtx->width * pCodecCtx->height /scale_ratio/scale_ratio;
     uvPlaneSz = yPlaneSz / 4;
     yPlane = (uint8_t*)av_malloc(yPlaneSz);
     uPlane = (uint8_t*)av_malloc(uvPlaneSz);
@@ -190,7 +213,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Couldn't allocate pixel buffers - exiting\n");
         exit(1);
     }
-    uvPitch = pCodecCtx->width/2;
+    uvPitch = pCodecCtx->width/2/scale_ratio;//for U and V layer, equals 1/2 Y layer
     // Read frames and save first five frames to disk
     i=0;
     while(av_read_frame(pFormatCtx, &packet)>=0) {
@@ -205,15 +228,16 @@ int main(int argc, char *argv[]) {
                 //SDL_LockYUVOverlay(bmp);
                 //<<< End old code
 
-                AVPicture pict;
+                // AVPicture pict;
+                //@Replace: instead of using pict.data, we use scaleFrame
                 //<<< New code
-                pict.data[0] = yPlane;
-                pict.data[1] = uPlane;
-                pict.data[2] = vPlane;
-
-                pict.linesize[0] = pCodecCtx->width;
-                pict.linesize[1] = uvPitch;
-                pict.linesize[2] = uvPitch;
+                // pict.data[0] = yPlane;
+                // pict.data[1] = uPlane;
+                // pict.data[2] = vPlane;
+                //
+                // pict.linesize[0] = pCodecCtx->width/scale_ratio;//for YUV, this equals Y plane, equals width
+                // pict.linesize[1] = uvPitch;
+                // pict.linesize[2] = uvPitch;
 
                 //>>> Old code
                 //pict.data[0] = bmp->pixels[0];
@@ -226,13 +250,27 @@ int main(int argc, char *argv[]) {
                 //<<< End old code
 
                 // Convert the image into YUV format that SDL uses
+                //sws_scale params:
+                //context, srcSlice,
+                //srcStride, srcSliceY, srcSliceH,
+                //u8int_t *const dst, const int dstStride[]
+                //sws_scale(sws_ctx, (uint8_t const * const *)pFrame->data,
+                //          pFrame->linesize, 0, pCodecCtx->height,
+                //          pict.data, pict.linesize);
+                //@Newer
                 sws_scale(sws_ctx, (uint8_t const * const *)pFrame->data,
-                          pFrame->linesize, 0, pCodecCtx->height,
-                          pict.data, pict.linesize);
+                    pFrame->linesize, 0, pCodecCtx->height,
+                    scaleFrame->data, scaleFrame->linesize);
 
                 //>>> New code
-                SDL_UpdateYUVTexture(texture, NULL, yPlane, pCodecCtx->width, 
-                                     uPlane, uvPitch, vPlane, uvPitch);
+                //SDL_UpdateYUVTexture(texture, NULL, yPlane, pCodecCtx->width,
+                //                     uPlane, uvPitch, vPlane, uvPitch);
+                //@Newer
+                SDL_UpdateYUVTexture(texture, NULL,
+                    scaleFrame->data[0], scaleFrame->linesize[0],
+                    scaleFrame->data[1], scaleFrame->linesize[1],
+                    scaleFrame->data[2], scaleFrame->linesize[2]);
+
                 SDL_RenderClear(renderer);//Clear the old renderer
                 //Copy texture to renderer
                 SDL_RenderCopy(renderer, texture, NULL, NULL);
@@ -255,7 +293,8 @@ int main(int argc, char *argv[]) {
         }
 
         // Free the packet that was allocated by av_read_frame
-        av_free_packet(&packet);
+        //av_free_packet(&packet);
+        av_packet_unref(&packet);
         SDL_PollEvent(&event);
         switch(event.type) {
             case SDL_QUIT:
@@ -273,6 +312,7 @@ int main(int argc, char *argv[]) {
 
     // Free the YUV frame
     av_frame_free(&pFrame);
+    av_frame_free(&scaleFrame);
     av_free(yPlane);
     av_free(uPlane);
     av_free(vPlane);
