@@ -4,7 +4,7 @@ extern "C"
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 }
-#include "FFMpegManager.h"
+#include "../include/FFMpegManager.h"
 #include <stdio.h>
 
 // compatibility with newer API
