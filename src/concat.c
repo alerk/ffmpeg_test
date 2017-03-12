@@ -3,22 +3,77 @@
 
 static void callbackHandle(int arg)
 {
-    printf("\r %d %% - Completed", arg);
+    printf("Progress: %d %% - Completed\n", arg);
     return;
 }
 
 int main(int argc, char *argv[])
 {
-    if(argc<3)
+    int quit = 0;
+    int selection = -1;
+    int nb_files = -1, i=0;
+    char *input_files[5];
+    char output_file[20];
+    for(i=0;i<5;i++)
     {
-        fprintf(stderr, "Please call with enough param\n");
-        fprintf(stderr, "inputFile1 inputFile2 outputFile");
-        return -1;
+        input_files[i]=(char *)malloc(20*sizeof(char));
     }
-    char *inputFiles[] = {argv[1], argv[2]};
-    int nb_files = argc - 2;
-    // params: inputFiles, outputFile, width, height, codec = 0, callbackHandle;
-    FX_concat(nb_files, inputFiles, argv[3], &callbackHandle);
+    /* Menu: 1. Concat 2. Quit */
+    do
+    {
+        selection = -1;
+        printf("1. Concat\n2. Quit\nSelection: ");
+        scanf("%d", &selection);
+        switch(selection)
+        {
+            case 1:
+            {
+                printf("nb_files: ");
+                scanf("%d", &nb_files);
+                if(nb_files<0)
+                {
+                    nb_files = 2;
+                }
+                for(i=0;i<nb_files;i++)
+                {
+                    printf("File %d: ",i);
+                    scanf("%s", input_files[i]);
+                }
+                printf("Output: ");
+                scanf("%s", output_file);
+                FX_concat(nb_files, input_files, output_file, &callbackHandle);
+                printf("Job done! Choose next task:\n");
+            }
+                break;
+            case 2:
+                quit = 1;
+                break;
+            default:
+                printf("Invalid option (%d)\n", selection);
+                break;
+        }
+    /* If 1:
+        Accept number of input, input1, input2, ..., output from console */
+
+    /* If 2:
+        Quit */
+
+    } while (quit!=1);
+    for(i=0;i<5;i++)
+    {
+        free(input_files[i]);
+    }
+
+    // if(argc<3)
+    // {
+    //     fprintf(stderr, "Please call with enough param\n");
+    //     fprintf(stderr, "inputFile1 inputFile2 outputFile");
+    //     return -1;
+    // }
+    // char *inputFiles[] = {argv[1], argv[2]};
+    // int nb_files = argc - 2;
+    // // params: inputFiles, outputFile, width, height, codec = 0, callbackHandle;
+    // FX_concat(nb_files, inputFiles, argv[3], &callbackHandle);
 
     printf("Program ended!\n");
     return 0;
