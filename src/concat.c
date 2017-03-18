@@ -18,36 +18,55 @@ int main(int argc, char *argv[])
     {
         input_files[i]=(char *)malloc(20*sizeof(char));
     }
-    /* Menu: 1. Concat 2. Quit */
+    /* Menu: 1. Concat 2. Overlay 3. Quit */
     do
     {
         selection = -1;
-        printf("1. Concat\n2. Quit\nSelection: ");
+        printf("1. Concat\n2. Overlay\n3. Quit\nSelection: ");
         scanf("%d", &selection);
         switch(selection)
         {
             case 1:
             {
-                printf("nb_files: ");
-                scanf("%d", &nb_files);
-                if(nb_files<0)
-                {
-                    nb_files = 2;
-                }
-                for(i=0;i<nb_files;i++)
-                {
-                    printf("File %d: ",i);
-                    scanf("%s", input_files[i]);
-                }
-                printf("Output: ");
-                scanf("%s", output_file);
+                // printf("nb_files: ");
+                // scanf("%d", &nb_files);
+                // if(nb_files<0)
+                // {
+                //     nb_files = 2;
+                // }
+                // for(i=0;i<nb_files;i++)
+                // {
+                //     printf("File %d: ",i);
+                //     scanf("%s", input_files[i]);
+                // }
+                // printf("Output: ");
+                // scanf("%s", output_file);
+                nb_files = 2;
+                strcpy(input_files[0], "f1.MOV");
+                strcpy(input_files[1], "vid11.MOV");
+                strcpy(output_file, "f_o.MOV");
                 FX_concat(nb_files, input_files, output_file, &callbackHandle);
                 printf("Job done! Choose next task:\n");
             }
-                break;
+            break;
             case 2:
+            {
+                strcpy(input_files[0], "f1.MOV");
+                strcpy(input_files[1], "03s_017.mp4");
+                strcpy(output_file, "f_overlay.MOV");
+                float alpha = 0.1f;
+                // for(int t=1;t<10;t++)
+                // {
+                //     sprintf(output_file, "f_overlay_%d.MOV",t*10);
+                //
+                // }
+                FX_overlay(input_files[0], input_files[1], output_file, alpha);
+                printf("Job overlay done! Choose next task:\n");
+            }
+            break;
+            case 3:
                 quit = 1;
-                break;
+            break;
             default:
                 printf("Invalid option (%d)\n", selection);
                 break;

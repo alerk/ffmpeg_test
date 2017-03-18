@@ -1,4 +1,5 @@
 int FX_concat(int nb_files, char **input_files, char *output_file, void (*callback)(int));
+int FX_overlay(const char *input_file, const char *effect_file, const char *output_file, float alpha);
 
 /*
 

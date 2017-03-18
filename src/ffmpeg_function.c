@@ -45,11 +45,13 @@
 #define DEFAULT_AUDIO_IN_CHANNEL_LAYOUT    AV_CH_LAYOUT_STEREO
 
 #define DEFAULT_AUDIO_OUT_SAMPLE_RATE       44100
-#define DEFAULT_AUDIO_OUT_SAMPLE_FMT        AV_SAMPLE_FMT_FLTP
+#define DEFAULT_AUDIO_OUT_SAMPLE_FMT        AV_SAMPLE_FMT_S16
 #define DEFAULT_AUDIO_OUT_CHANNELS          2
 #define DEFAULT_AUDIO_OUT_CHANNEL_LAYOUT    AV_CH_LAYOUT_STEREO
 #define DEFAULT_AUDIO_OUT_CODEC             AV_CODEC_ID_AAC
 #define AUDIO_OUT_EXPANSION_BUFFER          1024
+
+#define MAX_COLOR_DIFF  450 //150 for each channel
 
 //#define DEBUG_DISPLAY_SCREEN
 
@@ -112,7 +114,7 @@ static int open_input_file(const char *filename, AVFormatContext **ifmt_ctx_ptr,
     }
 
     av_dump_format(ifmt_ctx, 0, filename, 0);
-    return 0;
+    return 1;
 }
 
 static int open_output_file(const char *filename, AVFormatContext *ifmt_ctx,
@@ -158,7 +160,8 @@ static int open_output_file(const char *filename, AVFormatContext *ifmt_ctx,
         {
             /* in this example, we choose transcoding to same codec */
             encoder = avcodec_find_encoder(dec_ctx->codec_id);
-            if (!encoder) {
+            if (!encoder)
+            {
                 av_log(NULL, AV_LOG_FATAL, "Neccessary encoder not found\n");
                 return AVERROR_INVALIDDATA;
             }
@@ -241,7 +244,7 @@ static int open_output_file(const char *filename, AVFormatContext *ifmt_ctx,
                 // dec_ctx->channel_layout;
                 enc_ctx->channels = DEFAULT_AUDIO_OUT_CHANNELS;
                 /* take first format from list of supported formats */
-                enc_ctx->sample_fmt = dec_ctx->sample_fmt;
+                enc_ctx->sample_fmt = DEFAULT_AUDIO_OUT_SAMPLE_FMT;// dec_ctx->sample_fmt;
 
                 enc_ctx->time_base.den = enc_ctx->sample_rate;// dec_ctx->time_base.den;
                 enc_ctx->time_base.num = 1;//dec_ctx->time_base.num;
@@ -307,6 +310,51 @@ static int open_output_file(const char *filename, AVFormatContext *ifmt_ctx,
     }
 
     return 0;
+}
+
+static int add_audio_stream(AVFormatContext *ofmt_ctx, AVCodecContext *dec_ctx,
+    int *o_audio_st_id, int64_t *audio_last_pts, int last_sample_rate)
+{
+    int ret = -1;
+    //Create new audio output stream
+    AVCodec *encoder = avcodec_find_encoder(dec_ctx->codec_id);
+    if (!encoder)
+    {
+        av_log(NULL, AV_LOG_FATAL, "Neccessary encoder not found\n");
+        return AVERROR_INVALIDDATA;
+    }
+    AVStream *out_stream = avformat_new_stream(ofmt_ctx, encoder);
+    if (!out_stream)
+    {
+        av_log(NULL, AV_LOG_ERROR, "Failed allocating output stream\n");
+        return AVERROR_UNKNOWN;
+    }
+    AVCodecContext *enc_ctx = out_stream->codec;
+    enc_ctx->codec_type = dec_ctx->codec_type;
+    *o_audio_st_id = ofmt_ctx->nb_streams-1;//keep track of old o_audio_st_id
+    enc_ctx->codec_id = dec_ctx->codec_id;
+    enc_ctx->sample_rate = dec_ctx->sample_rate;
+    enc_ctx->channel_layout = DEFAULT_AUDIO_OUT_CHANNEL_LAYOUT;
+    enc_ctx->channels = DEFAULT_AUDIO_OUT_CHANNELS;
+    enc_ctx->sample_fmt = dec_ctx->sample_fmt;
+    enc_ctx->time_base.den = enc_ctx->sample_rate;
+    enc_ctx->time_base.num = 1;
+
+    out_stream->time_base.den = enc_ctx->sample_rate;
+    out_stream->time_base.num = 1;
+
+    if(*audio_last_pts!=0)
+    {
+        //Rescale to new sample_rate
+        *audio_last_pts = av_rescale_rnd(*audio_last_pts, dec_ctx->sample_rate, last_sample_rate, AV_ROUND_UP);
+    }
+    ret = avcodec_open2(enc_ctx, encoder, NULL);
+    if (ret < 0)
+    {
+        av_log(NULL, AV_LOG_ERROR, "Cannot open video encoder for stream #%d\n", *o_audio_st_id);
+        return ret;
+    }
+    return 1;
 }
 
 static int encode_write_frame_flush(AVFormatContext *ofmt_ctx,
@@ -381,14 +429,14 @@ static int encode_write_frame(AVFormatContext *ofmt_ctx, int type,
         enc_func = avcodec_encode_audio2;
 
     } else {
-        printf("Unknown\n");
+        av_log(NULL, AV_LOG_INFO, "Unknown\n");
         return 0;
     }
 
     if (!got_frame)
         got_frame = &got_frame_local;
 
-    av_log(NULL, AV_LOG_INFO, "Encoding frame\n");
+    //av_log(NULL, AV_LOG_INFO, "Encoding frame\n");
     /* encode filtered frame */
     enc_pkt.data = NULL;
     enc_pkt.size = 0;
@@ -407,8 +455,8 @@ static int encode_write_frame(AVFormatContext *ofmt_ctx, int type,
            ofmt_ctx->streams[o_stream_index]->codec->time_base,
            ofmt_ctx->streams[o_stream_index]->time_base);
 
-    printf("Muxing %s frame pts = %lld dts = %lld\n",
-           (type == AVMEDIA_TYPE_VIDEO)?"video":"audio", enc_pkt.pts, enc_pkt.dts);
+    // av_log(NULL, AV_LOG_INFO, "Muxing %s frame pts = %lld dts = %lld\n",
+    //        (type == AVMEDIA_TYPE_VIDEO)?"video":"audio", enc_pkt.pts, enc_pkt.dts);
     /* mux encoded frame */
     ret = av_interleaved_write_frame(ofmt_ctx, &enc_pkt);
     return ret;
@@ -535,9 +583,10 @@ int FX_concat(int nb_files, char **input_files, char *output_file, void (*callba
         struct SwsContext *sws_ctx = NULL;
         struct SwrContext *swr_ctx = NULL;
         int is_need_rescale = 0, is_need_resample = 0;
-        int video_buffer_pts = 0;
-        int last_dec_nb_samples=0;
+        int video_buffer_pts = 0, audio_buffer_pts = 0;
+        int last_dec_nb_samples=0, last_sample_rate = 0;
         AVCodecContext *dec_ctx=NULL, *enc_ctx=NULL;
+        audio_pts = 0;
         if ((ret = open_input_file(input_files[i], &ifmt_ctx,
             &i_audio_st_id, &i_video_st_id)) < 0)
         {
@@ -577,6 +626,18 @@ int FX_concat(int nb_files, char **input_files, char *output_file, void (*callba
             {
                 is_need_resample = 1;
                 enc_ctx = ofmt_ctx->streams[o_audio_st_id]->codec;
+                // if(enc_ctx->sample_rate != dec_ctx->sample_rate)
+                // {
+                //     last_sample_rate = enc_ctx->sample_rate;
+                //     //Create new audio_output_stream
+                //     ret = add_audio_stream(ofmt_ctx, dec_ctx, &o_audio_st_id, &audio_last_pts, last_sample_rate);
+                //     if(ret < 0)
+                //     {
+                //         printf("Failed on create new audio stream\n");
+                //         return -1;
+                //     }
+                // }
+
                 swr_ctx = swr_alloc();
                 if (!swr_ctx)
                 {
@@ -657,7 +718,7 @@ int FX_concat(int nb_files, char **input_files, char *output_file, void (*callba
                             AVFrame *scale_frame = av_frame_alloc();
                             scale_frame->width = enc_ctx->width;
                             scale_frame->height = enc_ctx->height;
-                            scale_frame->format = ofmt_ctx->streams[o_video_st_id]->codec->pix_fmt;
+                            scale_frame->format = enc_ctx->pix_fmt;
                             ret = av_frame_get_buffer(scale_frame, 32);
                             if(ret<0)
                             {
@@ -699,9 +760,17 @@ int FX_concat(int nb_files, char **input_files, char *output_file, void (*callba
                     {
                         enc_ctx = ofmt_ctx->streams[o_audio_st_id]->codec;
                         int nb_samples = 0,dst_nb_samples=0,max_dst_nb_samples=0;
+                        if(audio_buffer_pts+frame->pts < 0)
+                        {
+                            audio_buffer_pts = -(audio_buffer_pts+frame->pts);
+                        }
+                        frame->pts += audio_buffer_pts;
+
                         printf("\n[AUDIO] ");
                         printf("Primary pts: %lld/old_audio_pts: %lld\tnb_samples=%d\n",
-                               frame->pts, audio_pts, frame->nb_samples);
+                            frame->pts, audio_pts, frame->nb_samples);
+                        dec_ctx = ifmt_ctx->streams[stream_index]->codec;
+
                         dec_ctx->channels = av_get_channel_layout_nb_channels(dec_ctx->channel_layout);
                         if(dec_ctx->channels==0)
                         {
@@ -712,15 +781,16 @@ int FX_concat(int nb_files, char **input_files, char *output_file, void (*callba
                         {
                             enc_ctx->channels = DEFAULT_AUDIO_OUT_CHANNELS;
                         }
-
-                        dec_ctx = ifmt_ctx->streams[stream_index]->codec;
                         last_dec_nb_samples = nb_samples = frame->nb_samples;
+                        //Directly write frame into added audio_stream
+                        // frame->pts = audio_pts + audio_last_pts;
+                        // audio_pts += frame->nb_samples;
+                        // ret = encode_write_frame(ofmt_ctx, type, frame, stream_index, o_audio_st_id, NULL);
+
                         max_dst_nb_samples = dst_nb_samples =
                             av_rescale_rnd(nb_samples, enc_ctx->sample_rate,
                             dec_ctx->sample_rate, AV_ROUND_UP);
-                        dst_nb_samples = (int)av_rescale_rnd(
-                            swr_get_delay(swr_ctx, dec_ctx->sample_rate) + frame->nb_samples,
-                            enc_ctx->sample_rate, dec_ctx->sample_rate, AV_ROUND_UP);
+
                         AVFrame *audio_frame = alloc_audio_frame(
                             enc_ctx->sample_fmt, enc_ctx->channel_layout,
                             enc_ctx->sample_rate, dst_nb_samples);
@@ -732,15 +802,15 @@ int FX_concat(int nb_files, char **input_files, char *output_file, void (*callba
                             ret = swr_convert(swr_ctx,
                                               audio_frame->data, dst_nb_samples,
                                               (const uint8_t **)frame->data, frame->nb_samples);
+                            ret = swr_convert(swr_ctx,
+                                            audio_frame->extended_data, dst_nb_samples,
+                                            (const uint8_t **)frame->extended_data, frame->nb_samples);
                             if (ret < 0) {
                                 fprintf(stderr, "Error while converting\n");
                                 exit(1);
                             }
-                            if(frame->pts<audio_pts) {
-                                frame->pts = (audio_pts+last_dec_nb_samples);
-                            }
-                            audio_frame->pts = swr_next_pts(swr_ctx, frame->pts);
-                            audio_pts=frame->pts;
+                            audio_frame->pts = audio_pts + audio_last_pts;
+                            audio_pts+=ret;//ret = nb_converted_samples
                             ret = encode_write_frame(ofmt_ctx, type, audio_frame,
                                 stream_index, o_audio_st_id, NULL);
                             av_frame_free(&audio_frame);
@@ -821,5 +891,485 @@ end:
     {
         av_log(NULL, AV_LOG_ERROR, "Error occurred: %s\n", av_err2str(ret));
     }
+    return 0;
+}
+
+typedef struct AVFrameList
+{
+    AVFrame *frame;
+    struct AVFrameList *next_ptr;
+} AVFrameList;
+typedef struct AVFrameQueue
+{
+    AVFrameList *first, *last, *current;
+    int nb_frames;
+    int size;
+} AVFrameQueue;
+int init_queue(AVFrameQueue *q)
+{
+    q->last = q->first = NULL;
+    q->current = q->first;
+    q->nb_frames = 0;
+    q->size = 0;
+}
+int put_frame_to_queue(AVFrameQueue *q, AVFrame *i_frame)
+{
+    AVFrameList *_frame = av_malloc(sizeof(AVFrameList));
+    if(!_frame)
+    {
+        fprintf(stderr, "Cannot alloc AVFrameList\n");
+        return 0;
+    }
+    (_frame->frame) = i_frame;
+    _frame->next_ptr = NULL;
+    if(!q->last) //queue is NULL, this is the 1st item
+    {
+        q->first = _frame;
+        q->current = q->first;
+    }
+    else //Append
+    {
+        q->last->next_ptr = _frame;
+    }
+    q->last = _frame;
+    q->nb_frames++;
+    return 1;
+}
+/**
+Get a frame at current and move current to next position
+if (current->next_ptr == NULL) {current = first;}
+*/
+int get_frame_from_queue(AVFrameQueue *q, AVFrame **o_frame)
+{
+    if(!q->first) //queue NULL
+    {
+        fprintf(stderr, "Queue is empty\n");
+        return 0;
+    }
+    //put the q->current->frame to output frame
+    *o_frame = q->current->frame;
+    if(q->current->next_ptr == NULL) //Already at the last pointer
+    {
+        q->current = q->first;
+    }
+    else
+    {
+        q->current = q->current->next_ptr;
+    }
+    return 1;
+}
+
+int open_effect_file(const char *effect_file, AVFrameQueue *e_a_frame, AVFrameQueue *e_v_frame,
+    int width, int height, int pix_fmt)
+{
+    int stream_index, ret=0, got_frame;
+    unsigned int i = 0;
+    enum AVMediaType type;
+    AVFormatContext *efmt_ctx=NULL;
+    AVPacket packet = { .data = NULL, .size = 0 };
+    AVFormatContext *ifmt_ctx;
+    AVCodecContext *e_ctx;
+    struct SwsContext *sws_ctx = NULL;
+    int64_t video_pts = 0;
+
+    int e_audio_st_id = -1, e_video_st_id = -1;
+
+    if ((ret = avformat_open_input(&efmt_ctx, effect_file, NULL, NULL)) < 0)
+    {
+        av_log(NULL, AV_LOG_ERROR, "Cannot open effect file\n");
+        return ret;
+    }
+
+    if ((ret = avformat_find_stream_info(efmt_ctx, NULL)) < 0)
+    {
+        av_log(NULL, AV_LOG_ERROR, "Cannot find stream information\n");
+        return ret;
+    }
+
+    for (i = 0; i < efmt_ctx->nb_streams; i++)
+    {
+        AVStream *stream;
+        AVCodecContext *codec_ctx;
+        stream = efmt_ctx->streams[i];
+        codec_ctx = stream->codec;
+
+        if (codec_ctx->codec_type == AVMEDIA_TYPE_VIDEO
+            || codec_ctx->codec_type == AVMEDIA_TYPE_AUDIO) {
+            /* Open decoder */
+            ret = avcodec_open2(codec_ctx,
+                                avcodec_find_decoder(codec_ctx->codec_id), NULL);
+            if (ret < 0) {
+                av_log(NULL, AV_LOG_ERROR, "Failed to open decoder for stream #%u\n", i);
+                return ret;
+            }
+            if(codec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
+            {
+                e_audio_st_id = i;
+            } else {
+                e_video_st_id = i;
+                sws_ctx = sws_getContext(codec_ctx->width, codec_ctx->height,
+                    codec_ctx->pix_fmt,
+                    width, height,
+                    pix_fmt,
+                    SWS_BILINEAR, NULL, NULL, NULL);
+            }
+        }
+    }
+
+    av_dump_format(efmt_ctx, 0, effect_file, 0);
+    struct AVRational o_timebase = (AVRational){1,DEFAULT_VIDEO_OUT_FRAME_RATE};
+
+    while(av_read_frame(efmt_ctx, &packet)>=0)
+    {
+        stream_index = packet.stream_index;
+        type = efmt_ctx->streams[stream_index]->codec->codec_type;
+
+        if(type==AVMEDIA_TYPE_VIDEO)
+        {
+            AVFrame *frame = av_frame_alloc();
+            if (!frame) {
+                ret = AVERROR(ENOMEM);
+                break;
+            }
+            av_packet_rescale_ts(&packet,
+                efmt_ctx->streams[stream_index]->time_base,
+                efmt_ctx->streams[stream_index]->codec->time_base);
+            ret = avcodec_decode_video2(efmt_ctx->streams[stream_index]->codec, frame,
+                &got_frame, &packet);
+            if(ret < 0)
+            {
+                printf("Cannot decode effect video frame\n");
+                return -1;
+            }
+            //Should convert to ofmt_ctx format & frame_rate
+            if(got_frame)
+            {
+                e_ctx = efmt_ctx->streams[stream_index]->codec;
+                frame->pts = av_frame_get_best_effort_timestamp(frame);
+                AVFrame *video_frame = av_frame_alloc();
+                if(!video_frame)
+                {
+                    ret = AVERROR(ENOMEM);
+                    break;
+                }
+                video_frame->width = width;
+                video_frame->height = height;
+                video_frame->format = pix_fmt;
+                ret = av_frame_get_buffer(video_frame, 32);
+                if(ret<0)
+                {
+                    fprintf(stderr, "Failed to alloc video_frame buffer\n");
+                    break;
+                }
+                sws_scale(sws_ctx, (uint8_t const * const *)frame->data,
+                        frame->linesize, 0, e_ctx->height,
+                        video_frame->data, video_frame->linesize);
+                video_frame->pts = av_rescale_q(frame->pts, e_ctx->time_base, o_timebase);
+                if(video_frame->pts<=video_pts)
+                {
+                    video_frame->pts++;
+                }
+                printf("current_pts: %lld\n", video_frame->pts);
+                video_pts=video_frame->pts;
+                //Put to queue
+                put_frame_to_queue(e_v_frame, video_frame);
+            }
+            av_frame_free(&frame);
+        }
+        else if(type==AVMEDIA_TYPE_AUDIO)
+        {
+            printf("[EFFECT] Audio frame read\n");
+        }
+    }/*--- End of while(av_read_frame(efmt_ctx, &packet)>=0) ---*/
+    close_input(&efmt_ctx);
+    return 1;
+}
+
+int open_output_file_with_effect(const char *output_file,
+    AVFormatContext *ifmt_ctx, AVFormatContext **ofmt_ctx,
+    int *o_audio_st_id, int *o_audio_effect_st_id, int *o_video_st_id)
+{
+    //Temporarily no audio for effect_file
+    open_output_file(output_file, ifmt_ctx, ofmt_ctx, o_audio_st_id, o_video_st_id);
+    return 1;
+}
+
+//x = col = width, y = row = height;
+int blend_pixel(AVFrame **dst, AVFrame *effect, int x, int y, float alpha)
+{
+    //because input ís YUV_420P = PLANAR, so the pixels are YYYY...UUUU...VVVV
+    //Modified: input is now RGB24 = RGB RGB RGB ...
+    //printf("[blend_pixel] Pos: %d x %d \n", x, y);
+    int uv_x=x, uv_y=y;
+    // uint8_t dst_r = (*dst)->data[0+(*dst)->linesize[0] * y + x];
+    // uint8_t dst_g = (*dst)->data[0+(*dst)->linesize[0] * uv_y + uv_x];
+    // uint8_t dst_b = (*dst)->data[0+(*dst)->linesize[0] * uv_y + uv_x];
+    uint8_t dst_r = (*dst)->data[0][0 + ((*dst)->linesize[0] * y + 3*x)];
+    uint8_t dst_g = (*dst)->data[0][1 + ((*dst)->linesize[0] * y + 3*x)];
+    uint8_t dst_b = (*dst)->data[0][2 + ((*dst)->linesize[0] * y + 3*x)];
+
+    uint8_t eff_r = effect->data[0][0 + (effect->linesize[0] * y + 3*x)];
+    uint8_t eff_g = effect->data[0][1 + (effect->linesize[0] * y + 3*x)];
+    uint8_t eff_b = effect->data[0][2 + (effect->linesize[0] * y + 3*x)];
+    float difference = 1.0*(abs(dst_r-eff_r) + abs(dst_g-eff_g) + abs(dst_b-eff_b));
+    float coeff = difference/MAX_COLOR_DIFF;
+    coeff = (coeff>1)?1:coeff;
+    // printf("[blend_pixel] Before: %u - %u - %u\t", dst_r, dst_g, dst_b);
+
+    dst_r = (uint8_t)(dst_r * coeff + eff_r * (1-coeff));
+    dst_g = (uint8_t)(dst_g * coeff + eff_g * (1-coeff));
+    dst_b = (uint8_t)(dst_b * coeff + eff_b * (1-coeff));
+
+    // printf("After: %u - %u - %u\n", dst_r, dst_g, dst_b);
+    // if(sum_before != sum_after)
+    // {
+    //     printf("[blend_pixel] CHANGED!\n");
+    // }
+
+    (*dst)->data[0][0 + ((*dst)->linesize[0] * y + 3*x)] = dst_r;
+    (*dst)->data[0][1 + ((*dst)->linesize[0] * y + 3*x)] = dst_g;
+    (*dst)->data[0][2 + ((*dst)->linesize[0] * y + 3*x)] = dst_b;
+
+    return 1;
+}
+int overlay_frame(AVFrame **frame, AVFrame *effect_frame, int width, int height, float alpha)
+{
+    int x=0, y=0, ret = 0;
+    struct SwsContext *sws_yuv_rgb = NULL, *sws_rgb_yuv = NULL;
+    AVFrame *rgb_frame = NULL, *rgb_effect = NULL;
+    //Prepare the RGB frames
+    rgb_frame = av_frame_alloc();
+    rgb_frame->width = width;
+    rgb_frame->height = height;
+    rgb_frame->format = AV_PIX_FMT_RGB24;
+    ret = av_frame_get_buffer(rgb_frame, 32);
+    rgb_effect = av_frame_alloc();
+    rgb_effect->width = width;
+    rgb_effect->height = height;
+    rgb_effect->format = AV_PIX_FMT_RGB24;
+    ret = av_frame_get_buffer(rgb_effect, 32);
+
+    sws_yuv_rgb = sws_getContext(width, height, (*frame)->format,
+        width, height, AV_PIX_FMT_RGB24,
+        SWS_BILINEAR, NULL, NULL, NULL);
+    sws_rgb_yuv = sws_getContext(width, height,AV_PIX_FMT_RGB24,
+        width, height, (*frame)->format,
+        SWS_BILINEAR, NULL, NULL, NULL);
+    //clone from YUV420P to RGB24
+    ret = sws_scale(sws_yuv_rgb, (uint8_t const * const *)(*frame)->data,
+            (*frame)->linesize, 0, height,
+            rgb_frame->data, rgb_frame->linesize);
+    if(ret<0)
+    {
+        fprintf(stderr,"cannot convert *frame to rgb_frame");
+        return -1;
+    }
+
+    ret = sws_scale(sws_yuv_rgb, (uint8_t const * const *)effect_frame->data,
+            effect_frame->linesize, 0, height,
+            rgb_effect->data, rgb_effect->linesize);
+    if(ret<0)
+    {
+        fprintf(stderr,"cannot convert effect_frame to rgb_effect");
+        return -1;
+    }
+
+    for(y=0; y<height; y++)
+    {
+        for(x = 0; x < width; x++)
+        {
+            blend_pixel(&rgb_frame, rgb_effect, x, y, alpha);
+        }
+    }
+
+    // clone back from RGB24 to YUV420P
+    ret = sws_scale(sws_rgb_yuv, (uint8_t const * const *)rgb_frame->data,
+            rgb_frame->linesize, 0, height,
+            (*frame)->data, (*frame)->linesize);
+    if(ret<0)
+    {
+        fprintf(stderr,"cannot convert rgb_frame back to frame");
+        return -1;
+    }
+    av_frame_free(&rgb_frame);
+    av_frame_free(&rgb_effect);
+    sws_freeContext(sws_yuv_rgb);
+    sws_freeContext(sws_rgb_yuv);
+
+    return 1;
+}
+int FX_overlay(const char *input_file, const char *effect_file, const char *output_file, float alpha)
+{
+    /**
+    - Read the inputfile, get the related param
+     + Video (width, height, format, frame_rate)
+     + Audio (sample_rate, sample_fmt, codec)
+
+    - Read the effectFile, get the related params
+     + Video (width, height, format, frame_rate) convert to inputFile (w, h, f, f_r)
+     + Audio: add a audio stream for every effect audio stream
+    */
+    int ret;
+    AVFormatContext *ifmt_ctx=NULL, *efmt_ctx=NULL, *ofmt_ctx=NULL;
+    AVPacket packet = { .data = NULL, .size = 0 };
+    AVFrame *frame = NULL;
+    AVFrame **e_v_frame_buf, **e_a_frame_buf;
+    AVCodecContext *dec_ctx,*enc_ctx;
+    AVFrameQueue e_audio_queue, e_video_queue;
+    enum AVMediaType type;
+    unsigned int stream_index;
+    unsigned int i;
+    int got_frame;
+    int (*dec_func)(AVCodecContext *, AVFrame *, int *, const AVPacket *);
+    int (*enc_func)(AVCodecContext *, AVPacket *, const AVFrame *, int *);
+    int o_video_st_id=0, i_video_st_id = 0, o_audio_st_id=0, i_audio_st_id=0, o_audio_effect_st_id = 0;
+    int video_buffer_pts=0, video_pts=0;
+    struct SwsContext *sws_ctx;
+
+    av_register_all();
+    avfilter_register_all();
+    avcodec_register_all();
+
+    //Open input file and get the input_format_context, input_audio_stream_id, input_video_stream_id
+    open_input_file(input_file, &ifmt_ctx, &i_audio_st_id, &i_video_st_id);
+    dec_ctx = ifmt_ctx->streams[i_video_st_id]->codec;
+    //Open effect file, put the audio frame to e_a_frame_buf, video frames to e_v_frame_buf
+    init_queue(&e_audio_queue);
+    init_queue(&e_video_queue);
+    open_effect_file(effect_file, &e_audio_queue, &e_video_queue, dec_ctx->width, dec_ctx->height, dec_ctx->pix_fmt);
+    // open_output_file_with_effect(output_file, ifmt_ctx, &ofmt_ctx,
+    //     &o_audio_st_id, &o_audio_effect_st_id, &o_video_st_id);
+    open_output_file(output_file, ifmt_ctx, &ofmt_ctx, &o_audio_st_id, &o_video_st_id);
+    enc_ctx = ofmt_ctx->streams[o_video_st_id]->codec;
+    sws_ctx = sws_getContext(dec_ctx->width, dec_ctx->height,
+                             dec_ctx->pix_fmt,
+                             enc_ctx->width, enc_ctx->height,
+                             enc_ctx->pix_fmt,
+                             SWS_BILINEAR, NULL, NULL, NULL);
+    //Scan through input file frames
+    printf("/*---- Overlay %f ----*/\n", alpha);
+    while(av_read_frame(ifmt_ctx, &packet)>=0)
+    {
+        stream_index = packet.stream_index;
+        type = ifmt_ctx->streams[stream_index]->codec->codec_type;
+
+        if(type==AVMEDIA_TYPE_VIDEO)
+        {
+            //Decode the video packet to frame
+            frame = av_frame_alloc();
+            if (!frame) {
+                ret = AVERROR(ENOMEM);
+                break;
+            }
+            av_packet_rescale_ts(&packet,
+                                 ifmt_ctx->streams[stream_index]->time_base,
+                                 ifmt_ctx->streams[stream_index]->codec->time_base);
+            /*get the packet, decode packet and encode to open_output_file */
+            ret = avcodec_decode_video2(ifmt_ctx->streams[stream_index]->codec, frame,
+                           &got_frame, &packet);
+            if (ret < 0)
+            {
+                av_frame_free(&frame);
+                fprintf(stderr, "Decoding failed\n");
+                break;
+            }
+            else
+            {
+                //printf("Decode_function ok!\n");
+            }
+
+            if (got_frame)
+            {
+                //printf("Got frame of decode\n");
+                frame->pts = av_frame_get_best_effort_timestamp(frame);
+                //Overlay the frame
+                AVFrame *effect_frame;
+                ret = get_frame_from_queue(&e_video_queue, &effect_frame);
+                if(ret<0)
+                {
+                    printf("Cannot get frame from video_queue\n");
+                    return 0;
+                }
+                // dec_ctx = ifmt_ctx->streams[stream_index]->codec;
+                // enc_ctx = ofmt_ctx->streams[o_video_st_id]->codec;
+                AVFrame *scale_frame = av_frame_alloc();
+                scale_frame->width = enc_ctx->width;
+                scale_frame->height = enc_ctx->height;
+                scale_frame->format = enc_ctx->pix_fmt;
+                ret = av_frame_get_buffer(scale_frame, 32);
+                if(ret<0)
+                {
+                    fprintf(stderr, "Failed to alloc scale_frame buffer\n");
+                    break;
+                }
+                sws_scale(sws_ctx, (uint8_t const * const *)frame->data,
+                        frame->linesize, 0, dec_ctx->height,
+                        scale_frame->data, scale_frame->linesize);
+                if(frame->pts + video_buffer_pts < 0)
+                {
+                    video_buffer_pts = -(frame->pts+video_buffer_pts);
+                }
+
+                scale_frame->pts = av_rescale_q(frame->pts,
+                    dec_ctx->time_base,enc_ctx->time_base);
+                if(scale_frame->pts<=video_pts)
+                {
+                    scale_frame->pts++;
+                }
+                video_pts=scale_frame->pts;
+
+                ret = overlay_frame(&scale_frame, effect_frame, enc_ctx->width, enc_ctx->height, alpha);
+                if(ret < 0)
+                {
+                    printf("Cannot do the overlay\n");
+                    return 0;
+                }
+                effect_frame->pts = scale_frame->pts;
+
+                //Encode to output video stream
+                ret = encode_write_frame(ofmt_ctx, type, scale_frame,
+                    stream_index, o_video_st_id, NULL);
+                av_frame_free(&scale_frame);
+
+            }
+            av_frame_free(&frame);
+        }
+        else if(type==AVMEDIA_TYPE_AUDIO)
+        {
+            //Decode the audio packet to frame
+            //Encode to output audio stream
+            //printf("[AUDIO] Write packet\n");
+            ret = av_interleaved_write_frame(ofmt_ctx, &packet);
+            if(ret < 0)
+            {
+                printf("Cannot write packet\n");
+                return -1;
+            }
+            /*--- assumed that no audio effect first ---*/
+            //Get the effect audio frame from queue
+            //Encode to output audio effect stream
+        }
+        else
+        {
+            //printf("AVMEDIA_TYPE_UNKNOWN\n");
+        }
+        av_packet_unref(&packet);
+    }/*--- End of while(av_read_frame(ifmt_ctx, &packet)>=0) ---*/
+    close_input(&ifmt_ctx);
+    if(sws_ctx)
+    {
+        sws_freeContext(sws_ctx);
+    }
+    /* flush filters and encoders */
+    for (i = 0; i < ofmt_ctx->nb_streams; i++)
+    {
+        /* flush encoder */
+        ret = flush_encoder(&ofmt_ctx, i);
+        if (ret < 0) {
+            av_log(NULL, AV_LOG_ERROR, "Flushing encoder failed\n");
+        }
+    }
+    av_write_trailer(ofmt_ctx);
+    close_output(&ofmt_ctx);
     return 0;
 }
