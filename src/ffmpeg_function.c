@@ -477,13 +477,13 @@ static AVFrame *alloc_audio_frame(enum AVSampleFormat sample_fmt,
     frame->channel_layout = channel_layout;
     frame->sample_rate = sample_rate;
     frame->nb_samples = nb_samples;
-    if (nb_samples) {
-        ret = av_frame_get_buffer(frame, 0);
-        if (ret < 0) {
-            fprintf(stderr, "Error allocating an audio buffer\n");
-            exit(1);
-        }
-    }
+    // if (nb_samples) {
+    //     ret = av_frame_get_buffer(frame, 0);
+    //     if (ret < 0) {
+    //         fprintf(stderr, "Error allocating an audio buffer\n");
+    //         exit(1);
+    //     }
+    // }
     return frame;
 }
 
@@ -559,6 +559,8 @@ int FX_concat(int nb_files, char **input_files, char *output_file, void (*callba
     int ret;
     AVPacket packet = { .data = NULL, .size = 0 };
     AVFrame *frame = NULL;
+    uint8_t **dst_data = NULL;
+    int dst_linesize;
     enum AVMediaType type;
     unsigned int stream_index;
     unsigned int i;
@@ -790,35 +792,67 @@ int FX_concat(int nb_files, char **input_files, char *output_file, void (*callba
                         max_dst_nb_samples = dst_nb_samples =
                             av_rescale_rnd(nb_samples, enc_ctx->sample_rate,
                             dec_ctx->sample_rate, AV_ROUND_UP);
-
+                        //Alloc a temp buffer
+                        ret = av_samples_alloc_array_and_samples(&dst_data, &dst_linesize, enc_ctx->channels,
+                            dst_nb_samples, enc_ctx->sample_fmt, 0);
+                        //Resample to that temp buffer
+                        int converted_nb_samples=0;
+                        converted_nb_samples = ret = swr_convert(swr_ctx,
+                            dst_data, dst_nb_samples,
+                            (const uint8_t **)frame->data, frame->nb_samples);
+                        //Create the audio_frame based on the converted samples
                         AVFrame *audio_frame = alloc_audio_frame(
                             enc_ctx->sample_fmt, enc_ctx->channel_layout,
-                            enc_ctx->sample_rate, dst_nb_samples);
+                            enc_ctx->sample_rate, converted_nb_samples);
+                        printf("converted_nb_samples: %d\n",converted_nb_samples);
+                        //Copy the temp buffer to audio_frame
+                        ret = av_frame_make_writable(audio_frame);
+                        // int64_t dst_bufsize = av_samples_get_buffer_size(&dst_linesize,
+                        //     enc_ctx->channels, converted_nb_samples, enc_ctx->sample_fmt, 1);
+                        // memcpy(audio_frame->data[0], dst_data, dst_bufsize);
+                        av_samples_fill_arrays(audio_frame->data, &dst_linesize,
+                            dst_data[0], enc_ctx->channels, converted_nb_samples, enc_ctx->sample_fmt, 1);
+                        //Encode the frame
+                        audio_frame->pts = audio_pts + audio_last_pts;
+                        audio_pts+=converted_nb_samples;//ret = nb_converted_samples
+                        ret = encode_write_frame(ofmt_ctx, type, audio_frame,
+                            stream_index, o_audio_st_id, NULL);
+                        av_frame_free(&audio_frame);
+                        //av_freep(&dst_data[0]);
 
-                        if(audio_frame)
-                        {
-                            ret = av_frame_make_writable(audio_frame);
-                            /*--- convert to destination audio sample ---*/
-                            ret = swr_convert(swr_ctx,
-                                              audio_frame->data, dst_nb_samples,
-                                              (const uint8_t **)frame->data, frame->nb_samples);
-                            ret = swr_convert(swr_ctx,
-                                            audio_frame->extended_data, dst_nb_samples,
-                                            (const uint8_t **)frame->extended_data, frame->nb_samples);
-                            if (ret < 0) {
-                                fprintf(stderr, "Error while converting\n");
-                                exit(1);
-                            }
-                            audio_frame->pts = audio_pts + audio_last_pts;
-                            audio_pts+=ret;//ret = nb_converted_samples
-                            ret = encode_write_frame(ofmt_ctx, type, audio_frame,
-                                stream_index, o_audio_st_id, NULL);
-                            av_frame_free(&audio_frame);
-                        }
-                        else
-                        {
-                            fprintf(stderr, "Cannot alloc output audio stream %s\n", input_files[i]);
-                        }
+                        // if(audio_frame)
+                        // {
+                        //     ret = av_frame_make_writable(audio_frame);
+                        //     /*--- convert to destination audio sample ---*/
+                        //
+                        //     // if(dst_nb_samples!=max_dst_nb_samples)
+                        //     // {
+                        //     //     av_frame_free(&audio_frame);
+                        //     //     audio_frame = alloc_audio_frame(
+                        //     //         enc_ctx->sample_fmt, enc_ctx->channel_layout,
+                        //     //         enc_ctx->sample_rate, dst_nb_samples);
+                        //     // }
+                        //     ret = swr_convert(swr_ctx,
+                        //                       audio_frame->data, dst_nb_samples,
+                        //                       (const uint8_t **)frame->data, frame->nb_samples);
+                        //     printf("dst_nb_samples: %d \t converted_nb_samples: %d\n", dst_nb_samples, ret);
+                        //     ret = swr_convert(swr_ctx,
+                        //                     audio_frame->extended_data, dst_nb_samples,
+                        //                     (const uint8_t **)frame->extended_data, frame->nb_samples);
+                        //     if (ret < 0) {
+                        //         fprintf(stderr, "Error while converting\n");
+                        //         exit(1);
+                        //     }
+                        //     audio_frame->pts = audio_pts + audio_last_pts;
+                        //     audio_pts+=ret;//ret = nb_converted_samples
+                        //     ret = encode_write_frame(ofmt_ctx, type, audio_frame,
+                        //         stream_index, o_audio_st_id, NULL);
+                        //     av_frame_free(&audio_frame);
+                        // }
+                        // else
+                        // {
+                        //     fprintf(stderr, "Cannot alloc output audio stream %s\n", input_files[i]);
+                        // }
                     }
                     av_frame_free(&frame);
                     if (ret < 0)
